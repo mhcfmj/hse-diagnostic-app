@@ -166,13 +166,30 @@ def generate_pdf(site_info, checklist_results, uploaded_images, risk_level):
 # --- Streamlit UI ---
 init_db()
 st.set_page_config(page_title="HSE Diagnostic Tool", layout="centered")
-st.title("\U0001F527 HSE Diagnostic Checklist")
+st.title("🔐 HSE Diagnostic Portal")
+
+# Basic login with session state
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if not st.session_state.logged_in:
+    with st.form("login_form"):
+        username = st.text_input("Enter your auditor name")
+        pin = st.text_input("Enter your access PIN", type="password")
+        submitted = st.form_submit_button("Log In")
+        if submitted:
+            if pin == "1234":  # simple default PIN
+                st.session_state.logged_in = True
+                st.session_state.auditor = username
+            else:
+                st.error("Incorrect PIN")
+    st.stop()
 
 site_type = st.selectbox("Site Type", SITE_TYPES)
-job_title = st.selectbox("Job Title", list(JOB_CHECKLISTS.keys()))
+job_title = st.selectbox("HSE Job Responsibility", list(JOB_CHECKLISTS.keys()))
 location = st.text_input("Site Location", "Stone's Beta-08")
-auditor = st.text_input("Auditor Name", "Jane Doe")
-date_today = datetime.today().strftime('%Y-%m-%d')
+auditor = st.session_state.auditor
+inspection_date = st.date_input("Inspection Date", datetime.today()).strftime('%Y-%m-%d')
 
 st.markdown("---")
 st.subheader("Checklist")
@@ -186,7 +203,8 @@ for item in JOB_CHECKLISTS[job_title]:
     with cols[1]:
         status = st.radio("", ["Yes", "No", "N/A"], horizontal=True, key=f"status_{item}")
     with cols[2]:
-        comment = st.text_input("Comment", key=f"comment_{item}")
+        default_comment = "" if status != "No" else st.selectbox("Common Issues", ["", "PPE missing", "Permit not visible", "Area not demarcated"], key=f"suggest_{item}")
+        comment = st.text_input("Comment", value=default_comment, key=f"comment_{item}")
     checklist_data[item] = {"status": status, "comment": comment}
     if status == "No":
         num_no += 1
@@ -205,24 +223,64 @@ else:
 
 if st.button("Generate PDF Report"):
     site_info = {
-        "Job Title": job_title,
+        "HSE Job Title": job_title,
+        "Job Title": job_title,  # for DB compatibility
         "Site Type": site_type,
         "Location": location,
-        "Date": date_today,
+        "Date": inspection_date,
         "Auditor": auditor
     }
-    pdf_file = generate_pdf(site_info, checklist_data, uploaded_images, risk_level)
+    pdf_file = generate_pdf(site_info, checklist_data, uploaded_images, risk_level)  # HSE responsibility
     log_report_to_db(site_info, pdf_file, risk_level)
     with open(pdf_file, "rb") as f:
         st.download_button("Download Report PDF", f, file_name=pdf_file, mime="application/pdf")
+
+st.markdown("---")
+st.markdown("---")
+st.subheader("📊 Compliance Dashboard")
+import matplotlib.pyplot as plt
+import pandas as pd
+
+conn = sqlite3.connect("hse_reports.db")
+c = conn.cursor()
+c.execute("SELECT date, job_title, site_type, location, auditor, risk_level FROM reports")
+dashboard_rows = c.fetchall()
+df_dash = pd.DataFrame(dashboard_rows, columns=["Date", "Job", "Site Type", "Location", "Auditor", "Risk Level"])
+conn.close()
+
+col1, col2 = st.columns(2)
+with col1:
+    st.metric("Total Reports", len(df_dash))
+    st.metric("Red Risk Count", sum(df_dash['Risk Level'] == 'Red'))
+with col2:
+    risk_counts = df_dash["Risk Level"].value_counts()
+    st.bar_chart(risk_counts)
 
 st.markdown("---")
 st.subheader("📁 View Past Reports")
 if st.checkbox("Show Report History"):
     conn = sqlite3.connect("hse_reports.db")
     c = conn.cursor()
-    c.execute("SELECT date, job_title, site_type, location, auditor, risk_level FROM reports ORDER BY date DESC")
+    filter_risk = st.selectbox("Filter by Risk", ["All", "Green", "Yellow", "Red"])
+    filter_auditor = st.text_input("Filter by Auditor")
+    query = "SELECT date, job_title, site_type, location, auditor, risk_level FROM reports WHERE 1=1"
+    if filter_risk != "All":
+        query += f" AND risk_level = '{filter_risk}'"
+    if filter_auditor:
+        query += f" AND auditor LIKE '%{filter_auditor}%'"
+    query += " ORDER BY date DESC"
+    c.execute(query)
     rows = c.fetchall()
     conn.close()
-    for row in rows:
-        st.write(f"**Date:** {row[0]} | **Job:** {row[1]} | **Site:** {row[2]} | **Location:** {row[3]} | **Auditor:** {row[4]} | **Risk:** {row[5]}")
+    import pandas as pd
+    df = pd.DataFrame(rows, columns=["Date", "Job", "Site Type", "Location", "Auditor", "Risk Level"])
+    st.dataframe(df)
+
+    if st.button("Download Filtered Reports as CSV"):
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download CSV",
+            data=csv,
+            file_name='filtered_hse_reports.csv',
+            mime='text/csv'
+        )
